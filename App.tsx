@@ -118,6 +118,10 @@ export default function App() {
   // New: Complex Shopping Input State
   const [newShoppingItem, setNewShoppingItem] = useState({ name: '', category: '藥妝', owner: '我' });
 
+  // Drag and Drop Refs
+  const dragItem = useRef<number | null>(null);
+  const dragOverItem = useRef<number | null>(null);
+
   // Default Setup Configuration (Korea)
   const defaultSetup: SetupConfig = { 
     destination: 'Seoul', 
@@ -346,6 +350,55 @@ export default function App() {
     newItems.splice(idx, 1);
     updateCurrentDay('items', newItems);
   };
+
+  // --- Sorting & Reordering ---
+
+  const sortItemsByTime = () => {
+    const sorted = [...currentDay.items].sort((a, b) => {
+      if (!a.time) return 1;
+      if (!b.time) return -1;
+      return a.time.localeCompare(b.time);
+    });
+    updateCurrentDay('items', sorted);
+  };
+
+  const moveItem = (index: number, direction: 'up' | 'down') => {
+    const newItems = [...currentDay.items];
+    if (direction === 'up') {
+      if (index === 0) return;
+      [newItems[index - 1], newItems[index]] = [newItems[index], newItems[index - 1]];
+    } else {
+      if (index === newItems.length - 1) return;
+      [newItems[index + 1], newItems[index]] = [newItems[index], newItems[index + 1]];
+    }
+    updateCurrentDay('items', newItems);
+  };
+
+  const handleDragStart = (e: React.DragEvent<HTMLDivElement>, position: number) => {
+    dragItem.current = position;
+    // Add a class or style to indicate dragging
+    e.currentTarget.classList.add('opacity-50');
+  };
+
+  const handleDragEnter = (e: React.DragEvent<HTMLDivElement>, position: number) => {
+    dragOverItem.current = position;
+  };
+
+  const handleDragEnd = (e: React.DragEvent<HTMLDivElement>) => {
+    e.currentTarget.classList.remove('opacity-50');
+    if (dragItem.current === null || dragOverItem.current === null) return;
+    
+    const newItems = [...currentDay.items];
+    const dragItemContent = newItems[dragItem.current];
+    newItems.splice(dragItem.current, 1);
+    newItems.splice(dragOverItem.current, 0, dragItemContent);
+    
+    dragItem.current = null;
+    dragOverItem.current = null;
+    updateCurrentDay('items', newItems);
+  };
+
+  // --- Flight & Expense & Shopping ---
 
   const toggleFlightCard = () => {
     if (currentDay.flight) {
@@ -696,7 +749,7 @@ export default function App() {
             <div 
               key={index} 
               onClick={() => setCurrentDayIdx(index)} 
-              className={`snap-center shrink-0 flex flex-col items-center justify-center w-16 h-16 rounded-xl cursor-pointer transition-all border-2 ${currentDayIdx === index ? 'bg-white text-teal-600 border-white shadow-lg scale-105' : 'bg-teal-500/50 text-teal-100 border-transparent hover:bg-teal-500'}`}
+              className={`snap-center shrink-0 flex flex-col items-center justify-center w-16 h-16 rounded-xl cursor-pointer transition-all border-2 ${currentDayIdx === index ? 'bg-white text-teal-600 border-white shadow-lg scale-105' : 'bg-teal-500/50 text-teal-100 border-transparent hover:bg-teal-50'}`}
             >
               <span className="text-xs font-medium opacity-80">{day.shortDate}</span>
               <span className="text-lg font-bold">D{index + 1}</span>
@@ -838,22 +891,42 @@ export default function App() {
             </div>
 
             <div className="relative pl-4 border-l-2 border-teal-100 space-y-8">
+              {/* Sorting Toolbar */}
+              <div className="absolute right-0 -top-10 flex gap-2">
+                 <button onClick={sortItemsByTime} className="text-xs bg-white text-teal-600 border border-teal-100 px-2 py-1 rounded shadow-sm hover:bg-teal-50 flex items-center gap-1">
+                   <i className="ph-bold ph-sort-ascending"></i> 按時間排序
+                 </button>
+              </div>
+
               {currentDay.items.map((item, idx) => (
-                <div key={idx} className="relative group">
+                <div 
+                  key={idx} 
+                  className="relative group draggable-item"
+                  draggable
+                  onDragStart={(e) => handleDragStart(e, idx)}
+                  onDragEnter={(e) => handleDragEnter(e, idx)}
+                  onDragEnd={handleDragEnd}
+                  onDragOver={(e) => e.preventDefault()}
+                >
                   <div className={`absolute -left-[21px] top-3 w-3 h-3 rounded-full border-2 border-white shadow-sm ${getDotColor(item.type)}`}></div>
                   <div className="bg-white p-3 rounded-xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
                     <div className="flex flex-col gap-2">
                       <div className="flex items-start gap-3">
+                        {/* Time Box: Fixed Width & Relative Container for Better Hit Area */}
                         <div className="flex flex-col items-center w-20 shrink-0 gap-2">
-                          <div className="relative flex flex-col items-center justify-center bg-slate-50 border border-slate-200 rounded-xl p-1 w-full h-16 cursor-pointer hover:bg-teal-50 hover:border-teal-200 transition group/time">
+                          <div className="relative flex flex-col items-center justify-center bg-slate-50 border border-slate-200 rounded-xl p-1 w-full h-16 cursor-pointer hover:bg-teal-50 hover:border-teal-200 transition group/time overflow-hidden">
                             <span className="text-[10px] font-medium text-slate-400 group-hover/time:text-teal-400">{getTimePeriod(item.time)}</span>
                             <span className="text-xl font-bold text-slate-700 group-hover/time:text-teal-600 leading-none font-mono tracking-tight">{item.time || '--:--'}</span>
                             <input 
                               type="time" 
                               value={item.time} 
                               onChange={(e) => updateItem(idx, 'time', e.target.value)} 
-                              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" 
+                              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-20" 
                             />
+                            {/* Visual Hint for touch */}
+                            <div className="absolute bottom-0 right-0 p-0.5 opacity-0 group-hover/time:opacity-100 transition-opacity">
+                               <i className="ph-bold ph-pencil-simple text-[10px] text-teal-400"></i>
+                            </div>
                           </div>
                           <select 
                             value={item.type} 
@@ -893,12 +966,18 @@ export default function App() {
                             />
                           </div>
                         </div>
-                        <div className="flex flex-col gap-2">
-                          <a href={item.location ? `https://map.naver.com/p/search/${encodeURIComponent(item.location)}` : '#'} target="_blank" className="text-green-500 hover:bg-green-50 p-1 rounded flex items-center justify-center" title="Naver Map">
-                             <div className="w-4 h-4 border-2 border-current rounded-sm flex items-center justify-center text-[10px] font-black font-sans">N</div>
-                          </a>
-                          <a href={item.location ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(item.location)}` : '#'} target="_blank" className="text-teal-500 hover:bg-teal-50 p-1 rounded" title="Google Maps"><i className="ph-bold ph-navigation-arrow"></i></a>
-                          <button onClick={() => removeItem(idx)} className="text-red-300 hover:text-red-500 p-1 rounded"><i className="ph-bold ph-trash"></i></button>
+                        
+                        {/* Action Buttons Column */}
+                        <div className="flex flex-col gap-1 items-center">
+                          <div className="flex flex-col gap-1 bg-slate-50 rounded-lg p-0.5 border border-slate-100">
+                             <button onClick={() => moveItem(idx, 'up')} disabled={idx===0} className="w-6 h-6 flex items-center justify-center text-slate-400 hover:text-teal-600 hover:bg-white rounded disabled:opacity-20"><i className="ph-bold ph-caret-up"></i></button>
+                             <button onClick={() => moveItem(idx, 'down')} disabled={idx===currentDay.items.length-1} className="w-6 h-6 flex items-center justify-center text-slate-400 hover:text-teal-600 hover:bg-white rounded disabled:opacity-20"><i className="ph-bold ph-caret-down"></i></button>
+                          </div>
+                          <div className="flex gap-1 mt-1">
+                            <a href={item.location ? `https://map.naver.com/p/search/${encodeURIComponent(item.location)}` : '#'} target="_blank" className="w-6 h-6 flex items-center justify-center text-green-500 hover:bg-green-50 rounded border border-transparent hover:border-green-200 text-[10px] font-black" title="Naver Map">N</a>
+                            <a href={item.location ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(item.location)}` : '#'} target="_blank" className="w-6 h-6 flex items-center justify-center text-teal-500 hover:bg-teal-50 rounded border border-transparent hover:border-teal-200" title="Google Maps"><i className="ph-bold ph-navigation-arrow"></i></a>
+                          </div>
+                          <button onClick={() => removeItem(idx)} className="text-slate-300 hover:text-red-500 p-1 mt-1"><i className="ph-bold ph-trash"></i></button>
                         </div>
                       </div>
                       
