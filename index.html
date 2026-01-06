@@ -1,0 +1,58 @@
+
+<!DOCTYPE html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>我的旅遊計畫 | Travel Plan</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    
+    <!-- Leaflet -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    
+    <!-- Phosphor Icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+
+    <style>
+      body {
+        font-family: 'Noto Sans TC', 'Noto Sans JP', sans-serif;
+        background-color: #F3F4F6;
+        overscroll-behavior-y: none; /* Prevent pull-to-refresh on mobile */
+      }
+      .hide-scroll::-webkit-scrollbar { display: none; }
+      .hide-scroll { -ms-overflow-style: none; scrollbar-width: none; }
+      
+      /* Leaflet Popup Styles Override */
+      .leaflet-popup-content-wrapper { border-radius: 12px; padding: 0; overflow: hidden; }
+      .leaflet-popup-content { margin: 0; width: 200px !important; }
+      
+      /* GPS Pulse Animation */
+      .gps-pulse {
+          width: 14px; height: 14px; border: 2px solid #fff; border-radius: 50%;
+          background-color: #3b82f6; box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.4);
+          animation: pulse-blue 2s infinite;
+      }
+      @keyframes pulse-blue {
+          0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+          70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/"
+  }
+}
+</script>
+</head>
+  <body class="text-slate-700 h-screen flex flex-col overflow-hidden">
+    <div id="root" class="h-full w-full"></div>
+  </body>
+</html>

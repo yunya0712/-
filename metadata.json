@@ -1,0 +1,7 @@
+{
+  "name": "我的旅遊計畫",
+  "description": "智能旅遊規劃、分帳與地圖工具",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
