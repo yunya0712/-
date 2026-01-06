@@ -39,6 +39,8 @@ interface ShoppingItem {
   id: string;
   name: string;
   isBought: boolean;
+  category: string; // New: Tag/Category
+  owner: string;    // New: Who wants to buy this
 }
 
 interface TripMeta {
@@ -100,6 +102,9 @@ export default function App() {
   const [participants, setParticipants] = useState(['我', '旅伴A']);
   const [exchangeRate, setExchangeRate] = useState(0.215);
   
+  // New: Shopping Categories Data
+  const [shoppingCategories, setShoppingCategories] = useState<string[]>(['藥妝', '零食', '伴手禮', '衣物', '電器']);
+
   // Trip Management
   const [tripList, setTripList] = useState<TripMeta[]>([]);
   const [currentTripId, setCurrentTripId] = useState<string | null>(null);
@@ -109,7 +114,9 @@ export default function App() {
   // Temp UI State
   const [newExpense, setNewExpense] = useState({ item: '', amount: '', payer: '我' });
   const [participantsStr, setParticipantsStr] = useState('我, 旅伴A');
-  const [newShoppingItemName, setNewShoppingItemName] = useState('');
+  
+  // New: Complex Shopping Input State
+  const [newShoppingItem, setNewShoppingItem] = useState({ name: '', category: '藥妝', owner: '我' });
 
   // Default Setup Configuration (Korea)
   const defaultSetup: SetupConfig = { 
@@ -160,9 +167,10 @@ export default function App() {
     localStorage.setItem(`${currentTripId}_days`, JSON.stringify(days));
     localStorage.setItem(`${currentTripId}_exp`, JSON.stringify(expenses));
     localStorage.setItem(`${currentTripId}_shop`, JSON.stringify(shoppingList));
+    localStorage.setItem(`${currentTripId}_shop_cats`, JSON.stringify(shoppingCategories)); // Save categories
     localStorage.setItem(`${currentTripId}_rate`, exchangeRate.toString());
     localStorage.setItem(`${currentTripId}_users`, participantsStr);
-  }, [days, expenses, shoppingList, exchangeRate, participantsStr, currentTripId]);
+  }, [days, expenses, shoppingList, shoppingCategories, exchangeRate, participantsStr, currentTripId]);
 
   // Save trip list when it changes
   useEffect(() => {
@@ -180,14 +188,29 @@ export default function App() {
     const lDays = localStorage.getItem(`${id}_days`);
     const lExp = localStorage.getItem(`${id}_exp`);
     const lShop = localStorage.getItem(`${id}_shop`);
+    const lShopCats = localStorage.getItem(`${id}_shop_cats`);
     const lUsers = localStorage.getItem(`${id}_users`);
     const lRate = localStorage.getItem(`${id}_rate`);
     const lConf = localStorage.getItem(`${id}_config`);
 
     if (lDays) setDays(JSON.parse(lDays));
     if (lExp) setExpenses(JSON.parse(lExp));
-    if (lShop) setShoppingList(JSON.parse(lShop));
-    else setShoppingList([]); // Reset if not found
+    
+    if (lShop) {
+      // Migration for old data structure if needed
+      const items = JSON.parse(lShop);
+      const migratedItems = items.map((i: any) => ({
+        ...i,
+        category: i.category || '未分類',
+        owner: i.owner || '我'
+      }));
+      setShoppingList(migratedItems);
+    } else {
+      setShoppingList([]);
+    }
+
+    if (lShopCats) setShoppingCategories(JSON.parse(lShopCats));
+    else setShoppingCategories(['藥妝', '零食', '伴手禮', '衣物', '電器']);
 
     if (lUsers) {
       setParticipantsStr(lUsers);
@@ -238,6 +261,7 @@ export default function App() {
     localStorage.setItem(`${newId}_days`, JSON.stringify(newDays));
     localStorage.setItem(`${newId}_exp`, '[]');
     localStorage.setItem(`${newId}_shop`, '[]');
+    localStorage.setItem(`${newId}_shop_cats`, JSON.stringify(['藥妝', '零食', '伴手禮', '衣物', '電器']));
     localStorage.setItem(`${newId}_users`, '我, 旅伴A');
     localStorage.setItem(`${newId}_rate`, setup.rate.toString());
     localStorage.setItem(`${newId}_config`, JSON.stringify(setup));
@@ -259,6 +283,7 @@ export default function App() {
     localStorage.removeItem(`${id}_days`);
     localStorage.removeItem(`${id}_exp`);
     localStorage.removeItem(`${id}_shop`);
+    localStorage.removeItem(`${id}_shop_cats`);
     localStorage.removeItem(`${id}_users`);
     localStorage.removeItem(`${id}_rate`);
     localStorage.removeItem(`${id}_config`);
@@ -353,14 +378,16 @@ export default function App() {
 
   // --- Shopping List Methods ---
   const addShoppingItem = () => {
-    if (!newShoppingItemName.trim()) return;
+    if (!newShoppingItem.name.trim()) return;
     const newItem: ShoppingItem = {
       id: generateId(),
-      name: newShoppingItemName.trim(),
+      name: newShoppingItem.name.trim(),
+      category: newShoppingItem.category,
+      owner: newShoppingItem.owner,
       isBought: false
     };
     setShoppingList(prev => [newItem, ...prev]);
-    setNewShoppingItemName('');
+    setNewShoppingItem(prev => ({ ...prev, name: '' })); // Keep last category/owner for convenience
   };
 
   const toggleShoppingItem = (id: string) => {
@@ -371,6 +398,14 @@ export default function App() {
 
   const removeShoppingItem = (id: string) => {
     setShoppingList(prev => prev.filter(item => item.id !== id));
+  };
+  
+  const addShoppingCategory = () => {
+    const cat = prompt("輸入新標籤名稱 (例如: 動漫周邊)");
+    if (cat && !shoppingCategories.includes(cat)) {
+      setShoppingCategories(prev => [...prev, cat]);
+      setNewShoppingItem(prev => ({ ...prev, category: cat }));
+    }
   };
 
   // --- API Calls ---
@@ -1089,15 +1124,48 @@ export default function App() {
             </div>
 
             <div className="bg-white rounded-xl shadow-sm p-4 mb-6 border border-slate-100">
-              <div className="flex gap-2">
+              <div className="flex gap-2 mb-3">
                 <input 
-                  value={newShoppingItemName}
-                  onChange={(e) => setNewShoppingItemName(e.target.value)}
+                  value={newShoppingItem.name}
+                  onChange={(e) => setNewShoppingItem({...newShoppingItem, name: e.target.value})}
                   onKeyDown={(e) => e.key === 'Enter' && addShoppingItem()}
                   placeholder="輸入想買的東西..." 
                   className="w-full bg-slate-50 border-none rounded-lg text-sm px-4 py-3 focus:ring-2 focus:ring-pink-400" 
                 />
-                <button onClick={addShoppingItem} className="bg-pink-500 hover:bg-pink-600 text-white px-4 py-2 rounded-lg font-bold"><i className="ph-bold ph-plus"></i></button>
+                <button onClick={addShoppingItem} className="bg-pink-500 hover:bg-pink-600 text-white px-4 py-2 rounded-lg font-bold shadow-sm whitespace-nowrap"><i className="ph-bold ph-plus"></i></button>
+              </div>
+              
+              <div className="flex flex-col gap-3">
+                 {/* Category Selector */}
+                 <div className="flex items-center gap-2 overflow-x-auto hide-scroll pb-1">
+                    <span className="text-[10px] text-slate-400 font-bold shrink-0">分類:</span>
+                    {shoppingCategories.map(cat => (
+                      <button 
+                        key={cat}
+                        onClick={() => setNewShoppingItem({...newShoppingItem, category: cat})}
+                        className={`px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${newShoppingItem.category === cat ? 'bg-pink-100 text-pink-600 border border-pink-200' : 'bg-slate-50 text-slate-500 border border-slate-100 hover:bg-slate-100'}`}
+                      >
+                        {cat}
+                      </button>
+                    ))}
+                    <button onClick={addShoppingCategory} className="px-2 py-1 rounded-full text-xs font-bold text-slate-400 border border-dashed border-slate-300 hover:border-pink-300 hover:text-pink-500 whitespace-nowrap">
+                       <i className="ph-bold ph-plus"></i>
+                    </button>
+                 </div>
+
+                 {/* Owner Selector */}
+                 <div className="flex items-center gap-2 overflow-x-auto hide-scroll pb-1">
+                    <span className="text-[10px] text-slate-400 font-bold shrink-0">誰要買:</span>
+                    {participants.map(p => (
+                      <button 
+                        key={p}
+                        onClick={() => setNewShoppingItem({...newShoppingItem, owner: p})}
+                        className={`px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${newShoppingItem.owner === p ? 'bg-teal-100 text-teal-700 border border-teal-200' : 'bg-slate-50 text-slate-500 border border-slate-100 hover:bg-slate-100'}`}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                 </div>
               </div>
             </div>
 
@@ -1109,15 +1177,25 @@ export default function App() {
                 </div>
               )}
               {shoppingList.map((item) => (
-                <div key={item.id} className={`flex items-center p-3 rounded-xl border shadow-sm transition-all group ${item.isBought ? 'bg-slate-50 border-slate-100' : 'bg-white border-slate-100'}`}>
+                <div key={item.id} className={`flex items-start p-3 rounded-xl border shadow-sm transition-all group ${item.isBought ? 'bg-slate-50 border-slate-100' : 'bg-white border-slate-100'}`}>
                   <button 
                     onClick={() => toggleShoppingItem(item.id)}
-                    className={`w-6 h-6 rounded-lg flex items-center justify-center border transition-all shrink-0 mr-3 ${item.isBought ? 'bg-pink-400 border-pink-400 text-white' : 'bg-white border-slate-300 text-transparent hover:border-pink-400'}`}
+                    className={`w-6 h-6 mt-0.5 rounded-lg flex items-center justify-center border transition-all shrink-0 mr-3 ${item.isBought ? 'bg-pink-400 border-pink-400 text-white' : 'bg-white border-slate-300 text-transparent hover:border-pink-400'}`}
                   >
                     <i className="ph-bold ph-check text-xs"></i>
                   </button>
-                  <div className={`flex-1 font-bold text-sm transition-all ${item.isBought ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
-                    {item.name}
+                  <div className="flex-1 min-w-0">
+                    <div className={`font-bold text-sm transition-all mb-1 truncate ${item.isBought ? 'text-slate-400 line-through' : 'text-slate-800'}`}>
+                      {item.name}
+                    </div>
+                    <div className="flex gap-2">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded border ${item.isBought ? 'bg-slate-100 text-slate-400 border-slate-200' : 'bg-pink-50 text-pink-600 border-pink-100'}`}>
+                        {item.category || '未分類'}
+                      </span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded border flex items-center gap-1 ${item.isBought ? 'bg-slate-100 text-slate-400 border-slate-200' : 'bg-teal-50 text-teal-600 border-teal-100'}`}>
+                        <i className="ph-fill ph-user"></i> {item.owner || '我'}
+                      </span>
+                    </div>
                   </div>
                   <button onClick={() => removeShoppingItem(item.id)} className="text-slate-300 hover:text-red-400 p-2"><i className="ph-fill ph-trash"></i></button>
                 </div>
@@ -1199,9 +1277,12 @@ export default function App() {
                  >
                    <div className="font-bold text-slate-800">{trip.destination || '未命名行程'}</div>
                    <div className="text-xs text-slate-400 mt-1">{trip.startDate} • {trip.daysCount} 天</div>
-                   {tripList.length > 1 && (
-                     <button onClick={(e) => deleteTrip(trip.id, e)} className="absolute right-3 top-3 text-slate-300 hover:text-red-500 p-1"><i className="ph-bold ph-trash"></i></button>
-                   )}
+                   <button 
+                     onClick={(e) => deleteTrip(trip.id, e)} 
+                     className="absolute right-2 top-2 text-slate-300 hover:text-red-500 p-2 rounded-full hover:bg-red-50 transition-colors z-10"
+                   >
+                     <i className="ph-bold ph-trash text-lg"></i>
+                   </button>
                  </div>
                ))}
             </div>
