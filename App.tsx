@@ -1,7 +1,11 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { initializeApp } from 'firebase/app';
+// @ts-ignore
+import { initializeApp, getApps, getApp, deleteApp } from 'firebase/app';
+// @ts-ignore
 import { getFirestore, doc, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
+// @ts-ignore
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 
 // --- Types ---
 interface TripItem {
@@ -63,6 +67,17 @@ interface SetupConfig {
 }
 
 // --- Constants & Helpers ---
+// Pre-configured Firebase Config
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBOSs5hcduO7f2a61KtMdFf44WoLVEYGP4",
+  authDomain: "my-korea-trip.firebaseapp.com",
+  projectId: "my-korea-trip",
+  storageBucket: "my-korea-trip.firebasestorage.app",
+  messagingSenderId: "753099310498",
+  appId: "1:753099310498:web:b5007cc84efcd94ee31efb",
+  measurementId: "G-CWEVNWQ4WS"
+};
+
 const generateId = () => 'trip_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
 
 const getWeatherIcon = (c: number) => {
@@ -123,10 +138,16 @@ export default function App() {
   
   // Cloud Sync State
   const [showCloudModal, setShowCloudModal] = useState(false);
-  const [firebaseConfigStr, setFirebaseConfigStr] = useState('');
+  const [firebaseConfigStr, setFirebaseConfigStr] = useState(JSON.stringify(FIREBASE_CONFIG, null, 2));
   const [db, setDb] = useState<any>(null);
   const [syncStatus, setSyncStatus] = useState<'offline' | 'connecting' | 'synced' | 'error'>('offline');
-  const [remoteUpdateTimestamp, setRemoteUpdateTimestamp] = useState(0);
+  const [userUid, setUserUid] = useState<string | null>(null);
+
+  // Sync Loop Prevention
+  const isRemoteUpdate = useRef(false);
+
+  // Auto Join State
+  const [pendingShareId, setPendingShareId] = useState<string | null>(null);
 
   // Temp UI State
   const [newExpense, setNewExpense] = useState({ item: '', amount: '', payer: '我' });
@@ -178,29 +199,47 @@ export default function App() {
     const parsedList = list ? JSON.parse(list) : [];
     setTripList(parsedList);
     
-    // Load Firebase Config
-    const fbConf = localStorage.getItem('firebase_config');
-    if (fbConf) {
-      setFirebaseConfigStr(fbConf);
-      initFirebase(fbConf);
-    }
+    // Auto Connect using hardcoded config automatically
+    initFirebase(null, FIREBASE_CONFIG);
 
-    if (parsedList.length > 0) {
-      switchTrip(parsedList[0].id);
+    // Check for shared URL
+    const params = new URLSearchParams(window.location.search);
+    const sharedId = params.get('tripId');
+    if (sharedId) {
+      setPendingShareId(sharedId);
+      setJoinTripId(sharedId);
+      // We don't show the modal immediately, we try to join in the background first
+      setSyncStatus('connecting');
     } else {
-      setShowSetupModal(true);
+      if (parsedList.length > 0) {
+        switchTrip(parsedList[0].id);
+      } else {
+        setShowSetupModal(true);
+      }
     }
   }, []);
 
+  // Effect to Auto-Join once DB is ready
+  useEffect(() => {
+    if (db && userUid && pendingShareId) {
+      joinTrip(pendingShareId);
+      setPendingShareId(null); // Clear pending so we don't join again
+    }
+  }, [db, userUid, pendingShareId]);
+
   useEffect(() => {
     if (!currentTripId) return;
+    // Don't overwrite local storage with empty data if we are loading
+    if (days.length === 0 && !setup.destination) return; 
+
     localStorage.setItem(`${currentTripId}_days`, JSON.stringify(days));
     localStorage.setItem(`${currentTripId}_exp`, JSON.stringify(expenses));
     localStorage.setItem(`${currentTripId}_shop`, JSON.stringify(shoppingList));
     localStorage.setItem(`${currentTripId}_shop_cats`, JSON.stringify(shoppingCategories));
     localStorage.setItem(`${currentTripId}_rate`, exchangeRate.toString());
     localStorage.setItem(`${currentTripId}_users`, participantsStr);
-  }, [days, expenses, shoppingList, shoppingCategories, exchangeRate, participantsStr, currentTripId]);
+    localStorage.setItem(`${currentTripId}_config`, JSON.stringify(setup));
+  }, [days, expenses, shoppingList, shoppingCategories, exchangeRate, participantsStr, setup, currentTripId]);
 
   useEffect(() => {
     if (tripList.length > 0) {
@@ -210,24 +249,73 @@ export default function App() {
 
   // --- Firebase Logic ---
 
-  const initFirebase = (configStr: string) => {
+  const initFirebase = async (inputStr: string | null, directConfig?: any) => {
     try {
-      const config = JSON.parse(configStr);
-      // Check if already initialized to avoid errors
-      let app;
-      try {
-        app = initializeApp(config);
-      } catch (e: any) {
-        // If duplicates, ignore
-        if (e.code === 'app/duplicate-app') {
-           // We can't easily get the existing app instance without importing 'getApp', 
-           // but normally initializeApp is fine if we don't re-run it violently.
-           // For simplicity in this env, we assume config is valid.
+      setSyncStatus('connecting');
+      let config = directConfig;
+
+      if (!config && inputStr) {
+        try {
+            // Robust parsing strategy:
+            // 1. Find the outermost curly braces to isolate the object definition
+            const firstOpen = inputStr.indexOf('{');
+            const lastClose = inputStr.lastIndexOf('}');
+
+            if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
+                const candidate = inputStr.substring(firstOpen, lastClose + 1);
+                
+                // 2. Try strict JSON parsing first (safe)
+                try {
+                    config = JSON.parse(candidate);
+                } catch (e) {
+                    // 3. If that fails (e.g. unquoted keys), evaluate as a JavaScript expression
+                    // using new Function is safer than eval() but still allows JS object literals
+                    config = new Function(`return ${candidate}`)();
+                }
+            } else {
+                 throw new Error("Cannot find object braces {} in input");
+            }
+        } catch (e) {
+            console.error("Parse Error:", e);
+            // If all else fails, show error
+            config = null;
         }
       }
-      const firestore = getFirestore(app);
-      setDb(firestore);
-      setSyncStatus('synced'); // Just means connected to instance
+
+      if (!config) {
+         setSyncStatus('error');
+         return;
+      }
+
+      // --- CRITICAL FIX ---
+      // If an app instance already exists, we MUST delete it before re-initializing
+      // otherwise Firebase will return the existing (broken/old) instance.
+      if (getApps().length > 0) {
+         try {
+           await deleteApp(getApp());
+         } catch(e) {
+           console.warn("Error deleting existing app, force proceeding", e);
+         }
+      }
+
+      const app = initializeApp(config);
+      
+      const auth = getAuth(app);
+      
+      // Anonymous Auth is Critical for Firestore Rules
+      await signInAnonymously(auth);
+      
+      onAuthStateChanged(auth, (user: any) => {
+        if (user) {
+          setUserUid(user.uid);
+          const firestore = getFirestore(app);
+          setDb(firestore);
+          setSyncStatus('synced');
+        } else {
+          setSyncStatus('error');
+        }
+      });
+
     } catch (e) {
       console.error("Firebase Init Error", e);
       setSyncStatus('error');
@@ -235,7 +323,6 @@ export default function App() {
   };
 
   const handleConnectCloud = () => {
-    localStorage.setItem('firebase_config', firebaseConfigStr);
     initFirebase(firebaseConfigStr);
   };
 
@@ -247,15 +334,10 @@ export default function App() {
       if (docSnap.exists()) {
         const data = docSnap.data();
         
-        // Prevent local echo: check timestamp or just simple compare
-        // Here we use a timestamp flag to ignore the immediate next effect trigger
-        // In a robust real-time app, we'd use more complex CRDTs or field-level updates.
-        // For this demo: "Last Write Wins", but remote updates win over local state.
-        
-        // Only update if data is different significantly (simplified)
-        // We set a flag to block the push-back
-        setRemoteUpdateTimestamp(Date.now());
-        
+        // --- Critical: Loop Prevention ---
+        // We set a flag to ignore the next save triggered by this state change
+        isRemoteUpdate.current = true;
+
         if (data.days) setDays(data.days);
         if (data.expenses) setExpenses(data.expenses);
         if (data.shoppingList) setShoppingList(data.shoppingList);
@@ -266,6 +348,13 @@ export default function App() {
         }
         if (data.shoppingCategories) setShoppingCategories(data.shoppingCategories);
         if (data.exchangeRate) setExchangeRate(data.exchangeRate);
+        
+        // Reset the flag after the debounce period + buffer
+        // This ensures that when the "Write" useEffect fires due to these changes,
+        // it sees the flag and aborts the write.
+        setTimeout(() => {
+          isRemoteUpdate.current = false;
+        }, 1200);
       }
     });
 
@@ -274,10 +363,12 @@ export default function App() {
 
   // Sync: Push Local Changes
   useEffect(() => {
-    if (!db || !currentTripId || syncStatus === 'offline' || syncStatus === 'error') return;
+    if (!db || !currentTripId || syncStatus !== 'synced') return;
     
-    // Block pushing if we just received a remote update (1.5s grace period)
-    if (Date.now() - remoteUpdateTimestamp < 1500) return;
+    // If this update was caused by a remote fetch, DO NOT WRITE BACK
+    if (isRemoteUpdate.current) {
+      return;
+    }
 
     const pushData = async () => {
       try {
@@ -289,7 +380,8 @@ export default function App() {
            participants: debouncedParts,
            shoppingCategories: debouncedCats,
            exchangeRate: debouncedRate,
-           lastUpdated: Date.now()
+           lastUpdated: Date.now(),
+           updatedBy: userUid
         }, { merge: true });
       } catch (e) {
         console.error("Sync push error", e);
@@ -297,43 +389,63 @@ export default function App() {
     };
 
     pushData();
-  }, [debouncedDays, debouncedExpenses, debouncedShopping, debouncedSetup, debouncedParts, debouncedCats, debouncedRate, db, currentTripId, syncStatus, remoteUpdateTimestamp]);
+  }, [debouncedDays, debouncedExpenses, debouncedShopping, debouncedSetup, debouncedParts, debouncedCats, debouncedRate, db, currentTripId, syncStatus, userUid]);
 
-  const joinTrip = async () => {
-     if (!db) return alert("請先設定 Firebase 連線");
-     if (!joinTripId) return;
+  const joinTrip = async (targetId?: string) => {
+     if (!db) return; // Wait for DB
+     
+     const idToJoin = targetId || joinTripId;
+     if (!idToJoin) return;
 
      setSyncStatus('connecting');
      try {
-       const docRef = doc(db, "trips", joinTripId);
+       const docRef = doc(db, "trips", idToJoin);
        const docSnap = await getDoc(docRef);
        
        if (docSnap.exists()) {
          const data = docSnap.data();
-         // Create local meta if not exists
-         const exists = tripList.find(t => t.id === joinTripId);
+         const exists = tripList.find(t => t.id === idToJoin);
+         
          if (!exists) {
            const newMeta: TripMeta = {
-             id: joinTripId,
+             id: idToJoin,
              destination: data.setup?.destination || '雲端行程',
              startDate: data.setup?.startDate || '',
              daysCount: data.setup?.days || 1
            };
            setTripList(prev => [newMeta, ...prev]);
          }
-         switchTrip(joinTripId);
+         
+         // Set immediate values from cloud to prevent empty flash
+         if (data.setup) setSetup(data.setup);
+         if (data.days) setDays(data.days);
+
+         switchTrip(idToJoin);
          setSyncStatus('synced');
          setShowCloudModal(false);
          setJoinTripId('');
+         
+         // Clear URL param if present to keep URL clean
+         if (window.history.pushState) {
+             const newurl = window.location.protocol + "//" + window.location.host + window.location.pathname;
+             window.history.pushState({path:newurl},'',newurl);
+         }
        } else {
-         alert("找不到此行程 ID");
+         alert("找不到此行程 ID，請確認連結是否正確。");
          setSyncStatus('synced');
        }
      } catch (e) {
        console.error(e);
-       alert("加入失敗");
+       alert("加入失敗，請檢查網路或 ID。");
        setSyncStatus('error');
      }
+  };
+
+  const copyShareLink = () => {
+      if (!currentTripId) return;
+      const url = `${window.location.origin}${window.location.pathname}?tripId=${currentTripId}`;
+      navigator.clipboard.writeText(url);
+      alert('邀請連結已複製！\n傳送給朋友，他們點開即可直接加入行程。');
   };
 
   // --- Methods ---
@@ -342,7 +454,7 @@ export default function App() {
     setCurrentTripId(id);
     setShowTripMenu(false);
     
-    // Load local first for speed
+    // Try to load local first for speed
     const lDays = localStorage.getItem(`${id}_days`);
     const lExp = localStorage.getItem(`${id}_exp`);
     const lShop = localStorage.getItem(`${id}_shop`);
@@ -414,7 +526,7 @@ export default function App() {
         });
     }
 
-    // Save initial state locally
+    // Save initial state
     localStorage.setItem(`${newId}_days`, JSON.stringify(newDays));
     localStorage.setItem(`${newId}_exp`, '[]');
     localStorage.setItem(`${newId}_shop`, '[]');
@@ -423,8 +535,14 @@ export default function App() {
     localStorage.setItem(`${newId}_rate`, setup.rate.toString());
     localStorage.setItem(`${newId}_config`, JSON.stringify(setup));
 
+    setDays(newDays);
+    setExpenses([]);
+    setShoppingList([]);
+    setParticipants(['我', '旅伴A']);
+    setParticipantsStr('我, 旅伴A');
+
     setTripList(prev => [newTripMeta, ...prev]);
-    switchTrip(newId);
+    setCurrentTripId(newId); // Set ID directly to trigger sync
     setShowSetupModal(false);
   };
 
@@ -436,7 +554,7 @@ export default function App() {
     setTripList(newList);
     localStorage.setItem('travel_app_index', JSON.stringify(newList));
     
-    // Cleanup Local
+    // Cleanup
     localStorage.removeItem(`${id}_days`);
     localStorage.removeItem(`${id}_exp`);
     localStorage.removeItem(`${id}_shop`);
@@ -444,8 +562,6 @@ export default function App() {
     localStorage.removeItem(`${id}_users`);
     localStorage.removeItem(`${id}_rate`);
     localStorage.removeItem(`${id}_config`);
-
-    // Note: We don't delete from cloud automatically to prevent accidental data loss for other shared users.
 
     if (currentTripId === id) {
       if (newList.length > 0) switchTrip(newList[0].id);
@@ -623,12 +739,10 @@ export default function App() {
     setIsSearchingRecs(true);
     
     try {
-      // 1. Geocode
       const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(item.location)}&limit=1`);
       const geoData = await geoRes.json();
       
       if (geoData && geoData.length > 0) {
-        // 2. Search nearby
         const finalQuery = `restaurant near ${item.location}`;
         const searchRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(finalQuery)}&limit=4`);
         const searchData = await searchRes.json();
@@ -735,7 +849,6 @@ export default function App() {
   useEffect(() => {
     if (viewMode !== 'map' || !currentDay) return;
     
-    // Defer initialization slightly to ensure DOM is ready
     const timer = setTimeout(async () => {
       // @ts-ignore
       if (!window.L) return;
@@ -751,7 +864,6 @@ export default function App() {
       
       const map = mapRef.current;
       
-      // Geolocation
       if ("geolocation" in navigator) {
         navigator.geolocation.getCurrentPosition(pos => {
           const { latitude, longitude } = pos.coords;
@@ -768,8 +880,6 @@ export default function App() {
         });
       }
 
-      // Markers
-      // Clear existing markers (hacky way for simple demo: remove all layers then re-add tile)
       map.eachLayer((layer: any) => {
         if (!layer._url) map.removeLayer(layer);
       });
@@ -814,7 +924,7 @@ export default function App() {
     }, 100);
 
     return () => clearTimeout(timer);
-  }, [viewMode, currentDayIdx]); // Re-run when switching to map or changing day
+  }, [viewMode, currentDayIdx]);
 
   // --- Render ---
 
@@ -836,14 +946,16 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {/* Share / Sync Button */}
             <button onClick={() => setShowCloudModal(true)} className={`p-2.5 rounded-xl transition-all h-11 w-11 flex items-center justify-center border border-teal-500/30 ${db ? 'bg-teal-500 text-white shadow-inner' : 'bg-teal-500/30 text-teal-200 hover:bg-teal-500/50'}`}>
-               <i className={`ph-bold ${db ? 'ph-cloud-check' : 'ph-cloud' } text-xl`}></i>
+               <i className={`ph-bold ${db ? (syncStatus === 'synced' ? 'ph-users' : 'ph-arrows-clockwise animate-spin') : 'ph-cloud-slash' } text-xl`}></i>
             </button>
             <div className="flex bg-teal-800/50 p-1 rounded-lg">
               <button onClick={() => setViewMode('plan')} className={`p-2 rounded-md transition-all ${viewMode === 'plan' ? 'bg-white text-teal-700 shadow-sm' : 'text-teal-200'}`}><i className="ph-bold ph-calendar-check text-lg"></i></button>
               <button onClick={() => setViewMode('map')} className={`p-2 rounded-md transition-all ${viewMode === 'map' ? 'bg-white text-teal-700 shadow-sm' : 'text-teal-200'}`}><i className="ph-bold ph-map-trifold text-lg"></i></button>
               <button onClick={() => setViewMode('money')} className={`p-2 rounded-md transition-all ${viewMode === 'money' ? 'bg-white text-teal-700 shadow-sm' : 'text-teal-200'}`}><i className="ph-bold ph-currency-dollar text-lg"></i></button>
               <button onClick={() => setViewMode('shopping')} className={`p-2 rounded-md transition-all ${viewMode === 'shopping' ? 'bg-white text-teal-700 shadow-sm' : 'text-teal-200'}`}><i className="ph-bold ph-shopping-cart text-lg"></i></button>
+              <button onClick={() => setViewMode('translate')} className={`p-2 rounded-md transition-all ${viewMode === 'translate' ? 'bg-white text-teal-700 shadow-sm' : 'text-teal-200'}`}><i className="ph-bold ph-translate text-lg"></i></button>
             </div>
           </div>
         </div>
@@ -1535,16 +1647,17 @@ export default function App() {
               </div>
               <h2 className="text-xl font-bold text-slate-800">雲端同步與共享</h2>
               <div className="flex items-center gap-2 mt-1">
-                 <div className={`w-2 h-2 rounded-full ${db ? 'bg-green-500' : 'bg-slate-300'}`}></div>
-                 <span className="text-xs text-slate-500 font-bold">{db ? '已連線 Firebase' : '尚未設定連線'}</span>
+                 <div className={`w-2 h-2 rounded-full ${syncStatus === 'synced' ? 'bg-green-500' : syncStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`}></div>
+                 <span className="text-xs text-slate-500 font-bold">
+                    {syncStatus === 'synced' ? '已連線 Firebase' : syncStatus === 'connecting' ? '連線中...' : '尚未連線或錯誤'}
+                 </span>
               </div>
             </div>
 
-            {!db ? (
+            {syncStatus === 'error' ? (
               <div className="space-y-4">
-                <p className="text-xs text-slate-500 leading-relaxed bg-slate-50 p-3 rounded-xl border border-slate-100">
-                  請貼上您的 Firebase Config JSON 以啟用同步功能。
-                  <br/><span className="opacity-60 text-[10px]">提示: 前往 Firebase Console {'>'} Project Settings {'>'} General {'>'} Your apps</span>
+                <p className="text-xs text-red-500 leading-relaxed bg-red-50 p-3 rounded-xl border border-red-100">
+                  連線失敗。請確認您的 Firebase 設定是否正確，或網路是否正常。
                 </p>
                 <textarea 
                   value={firebaseConfigStr}
@@ -1553,19 +1666,23 @@ export default function App() {
                   className="w-full h-32 bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-mono focus:ring-2 focus:ring-teal-500 outline-none resize-none"
                 ></textarea>
                 <button onClick={handleConnectCloud} className="w-full bg-slate-800 text-white font-bold py-3 rounded-xl hover:bg-slate-700 transition">
-                  連線
+                  重試連線
                 </button>
               </div>
-            ) : (
+            ) : syncStatus === 'synced' ? (
               <div className="space-y-6">
                 <div className="bg-teal-50 p-4 rounded-xl border border-teal-100 text-center">
-                  <div className="text-xs text-teal-600 font-bold mb-1">當前行程 ID (分享給朋友)</div>
+                  <div className="flex items-center justify-center gap-2 mb-1">
+                      <div className="text-xs text-teal-600 font-bold">當前行程 ID</div>
+                      <button onClick={copyShareLink} className="bg-teal-100 hover:bg-teal-200 text-teal-700 text-[10px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1 transition-colors">
+                          <i className="ph-bold ph-link"></i> 複製邀請連結
+                      </button>
+                  </div>
                   <div className="text-2xl font-black font-mono tracking-widest text-teal-800 select-all cursor-pointer" onClick={() => { navigator.clipboard.writeText(currentTripId || ''); alert('已複製 ID'); }}>
                     {currentTripId}
                   </div>
                   <div className="text-[10px] text-teal-400 mt-2 flex items-center justify-center gap-1">
-                    {syncStatus === 'synced' ? <i className="ph-bold ph-check-circle"></i> : <i className="ph-bold ph-spinner animate-spin"></i>}
-                    {syncStatus === 'synced' ? '已與雲端同步' : '同步中...'}
+                    <i className="ph-bold ph-check-circle"></i> 已與雲端即時同步
                   </div>
                 </div>
 
@@ -1582,16 +1699,21 @@ export default function App() {
                        placeholder="輸入朋友的行程 ID..." 
                        className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-teal-500 outline-none" 
                      />
-                     <button onClick={joinTrip} className="bg-teal-600 text-white px-4 py-2 rounded-xl font-bold hover:bg-teal-700">
+                     <button onClick={() => joinTrip()} className="bg-teal-600 text-white px-4 py-2 rounded-xl font-bold hover:bg-teal-700">
                        加入
                      </button>
                    </div>
                 </div>
                 
-                <button onClick={() => { setDb(null); setSyncStatus('offline'); localStorage.removeItem('firebase_config'); }} className="w-full text-xs text-red-400 hover:text-red-500 py-2">
-                  斷開連線 / 清除設定
-                </button>
+                <div className="text-[10px] text-center text-slate-300">
+                   User ID: {userUid?.substring(0, 8)}...
+                </div>
               </div>
+            ) : (
+                <div className="text-center py-4">
+                    <i className="ph-duotone ph-spinner animate-spin text-3xl text-teal-500 mb-2"></i>
+                    <p className="text-sm text-slate-500">正在連線至雲端伺服器...</p>
+                </div>
             )}
           </div>
         </div>
