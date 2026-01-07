@@ -1,11 +1,5 @@
 
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-// @ts-ignore
-import { initializeApp, getApps, getApp, deleteApp } from 'firebase/app';
-// @ts-ignore
-import { getFirestore, doc, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
-// @ts-ignore
-import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 
 // --- Types ---
 interface TripItem {
@@ -67,17 +61,6 @@ interface SetupConfig {
 }
 
 // --- Constants & Helpers ---
-// Pre-configured Firebase Config
-const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyBOSs5hcduO7f2a61KtMdFf44WoLVEYGP4",
-  authDomain: "my-korea-trip.firebaseapp.com",
-  projectId: "my-korea-trip",
-  storageBucket: "my-korea-trip.firebasestorage.app",
-  messagingSenderId: "753099310498",
-  appId: "1:753099310498:web:b5007cc84efcd94ee31efb",
-  measurementId: "G-CWEVNWQ4WS"
-};
-
 const generateId = () => 'trip_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
 
 const getWeatherIcon = (c: number) => {
@@ -105,16 +88,6 @@ const countryInfoMap: Record<string, {c: string, l: string, n: string}> = {
   'th': {c:'THB',l:'th',n:'泰文'} 
 };
 
-// Hook for debouncing values
-function useDebounce<T>(value: T, delay: number): T {
-  const [debouncedValue, setDebouncedValue] = useState(value);
-  useEffect(() => {
-    const handler = setTimeout(() => setDebouncedValue(value), delay);
-    return () => clearTimeout(handler);
-  }, [value, delay]);
-  return debouncedValue;
-}
-
 // --- Components ---
 
 export default function App() {
@@ -136,24 +109,10 @@ export default function App() {
   const [showTripMenu, setShowTripMenu] = useState(false);
   const [showSetupModal, setShowSetupModal] = useState(false);
   
-  // Cloud Sync State
-  const [showCloudModal, setShowCloudModal] = useState(false);
-  const [firebaseConfigStr, setFirebaseConfigStr] = useState(JSON.stringify(FIREBASE_CONFIG, null, 2));
-  const [db, setDb] = useState<any>(null);
-  const [syncStatus, setSyncStatus] = useState<'offline' | 'connecting' | 'synced' | 'error'>('offline');
-  const [userUid, setUserUid] = useState<string | null>(null);
-
-  // Sync Loop Prevention
-  const isRemoteUpdate = useRef(false);
-
-  // Auto Join State
-  const [pendingShareId, setPendingShareId] = useState<string | null>(null);
-
   // Temp UI State
   const [newExpense, setNewExpense] = useState({ item: '', amount: '', payer: '我' });
   const [participantsStr, setParticipantsStr] = useState('我, 旅伴A');
   const [newShoppingItem, setNewShoppingItem] = useState({ name: '', category: '藥妝', owner: '我' });
-  const [joinTripId, setJoinTripId] = useState('');
 
   // Default Setup Configuration
   const defaultSetup: SetupConfig = { 
@@ -183,15 +142,6 @@ export default function App() {
 
   const currentDay = days[currentDayIdx] || { items: [], flight: null, date: '', fullDate: '', title: '' };
 
-  // --- Debounced Values for Cloud Sync ---
-  const debouncedDays = useDebounce(days, 1000);
-  const debouncedExpenses = useDebounce(expenses, 1000);
-  const debouncedShopping = useDebounce(shoppingList, 1000);
-  const debouncedSetup = useDebounce(setup, 1000);
-  const debouncedParts = useDebounce(participants, 1000);
-  const debouncedCats = useDebounce(shoppingCategories, 1000);
-  const debouncedRate = useDebounce(exchangeRate, 1000);
-
   // --- Persistence (Local) ---
 
   useEffect(() => {
@@ -199,33 +149,12 @@ export default function App() {
     const parsedList = list ? JSON.parse(list) : [];
     setTripList(parsedList);
     
-    // Auto Connect using hardcoded config automatically
-    initFirebase(null, FIREBASE_CONFIG);
-
-    // Check for shared URL
-    const params = new URLSearchParams(window.location.search);
-    const sharedId = params.get('tripId');
-    if (sharedId) {
-      setPendingShareId(sharedId);
-      setJoinTripId(sharedId);
-      // We don't show the modal immediately, we try to join in the background first
-      setSyncStatus('connecting');
+    if (parsedList.length > 0) {
+      switchTrip(parsedList[0].id);
     } else {
-      if (parsedList.length > 0) {
-        switchTrip(parsedList[0].id);
-      } else {
-        setShowSetupModal(true);
-      }
+      setShowSetupModal(true);
     }
   }, []);
-
-  // Effect to Auto-Join once DB is ready
-  useEffect(() => {
-    if (db && userUid && pendingShareId) {
-      joinTrip(pendingShareId);
-      setPendingShareId(null); // Clear pending so we don't join again
-    }
-  }, [db, userUid, pendingShareId]);
 
   useEffect(() => {
     if (!currentTripId) return;
@@ -246,207 +175,6 @@ export default function App() {
        localStorage.setItem('travel_app_index', JSON.stringify(tripList));
     }
   }, [tripList]);
-
-  // --- Firebase Logic ---
-
-  const initFirebase = async (inputStr: string | null, directConfig?: any) => {
-    try {
-      setSyncStatus('connecting');
-      let config = directConfig;
-
-      if (!config && inputStr) {
-        try {
-            // Robust parsing strategy:
-            // 1. Find the outermost curly braces to isolate the object definition
-            const firstOpen = inputStr.indexOf('{');
-            const lastClose = inputStr.lastIndexOf('}');
-
-            if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
-                const candidate = inputStr.substring(firstOpen, lastClose + 1);
-                
-                // 2. Try strict JSON parsing first (safe)
-                try {
-                    config = JSON.parse(candidate);
-                } catch (e) {
-                    // 3. If that fails (e.g. unquoted keys), evaluate as a JavaScript expression
-                    // using new Function is safer than eval() but still allows JS object literals
-                    config = new Function(`return ${candidate}`)();
-                }
-            } else {
-                 throw new Error("Cannot find object braces {} in input");
-            }
-        } catch (e) {
-            console.error("Parse Error:", e);
-            // If all else fails, show error
-            config = null;
-        }
-      }
-
-      if (!config) {
-         setSyncStatus('error');
-         return;
-      }
-
-      // --- CRITICAL FIX ---
-      // If an app instance already exists, we MUST delete it before re-initializing
-      // otherwise Firebase will return the existing (broken/old) instance.
-      if (getApps().length > 0) {
-         try {
-           await deleteApp(getApp());
-         } catch(e) {
-           console.warn("Error deleting existing app, force proceeding", e);
-         }
-      }
-
-      const app = initializeApp(config);
-      
-      const auth = getAuth(app);
-      
-      // Anonymous Auth is Critical for Firestore Rules
-      await signInAnonymously(auth);
-      
-      onAuthStateChanged(auth, (user: any) => {
-        if (user) {
-          setUserUid(user.uid);
-          const firestore = getFirestore(app);
-          setDb(firestore);
-          setSyncStatus('synced');
-        } else {
-          setSyncStatus('error');
-        }
-      });
-
-    } catch (e) {
-      console.error("Firebase Init Error", e);
-      setSyncStatus('error');
-    }
-  };
-
-  const handleConnectCloud = () => {
-    initFirebase(firebaseConfigStr);
-  };
-
-  // Sync: Listen for Remote Changes
-  useEffect(() => {
-    if (!db || !currentTripId) return;
-
-    const unsub = onSnapshot(doc(db, "trips", currentTripId), (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        
-        // --- Critical: Loop Prevention ---
-        // We set a flag to ignore the next save triggered by this state change
-        isRemoteUpdate.current = true;
-
-        if (data.days) setDays(data.days);
-        if (data.expenses) setExpenses(data.expenses);
-        if (data.shoppingList) setShoppingList(data.shoppingList);
-        if (data.setup) setSetup(data.setup);
-        if (data.participants) {
-           setParticipants(data.participants);
-           setParticipantsStr(data.participants.join(', '));
-        }
-        if (data.shoppingCategories) setShoppingCategories(data.shoppingCategories);
-        if (data.exchangeRate) setExchangeRate(data.exchangeRate);
-        
-        // Reset the flag after the debounce period + buffer
-        // This ensures that when the "Write" useEffect fires due to these changes,
-        // it sees the flag and aborts the write.
-        setTimeout(() => {
-          isRemoteUpdate.current = false;
-        }, 1200);
-      }
-    });
-
-    return () => unsub();
-  }, [db, currentTripId]);
-
-  // Sync: Push Local Changes
-  useEffect(() => {
-    if (!db || !currentTripId || syncStatus !== 'synced') return;
-    
-    // If this update was caused by a remote fetch, DO NOT WRITE BACK
-    if (isRemoteUpdate.current) {
-      return;
-    }
-
-    const pushData = async () => {
-      try {
-        await setDoc(doc(db, "trips", currentTripId), {
-           days: debouncedDays,
-           expenses: debouncedExpenses,
-           shoppingList: debouncedShopping,
-           setup: debouncedSetup,
-           participants: debouncedParts,
-           shoppingCategories: debouncedCats,
-           exchangeRate: debouncedRate,
-           lastUpdated: Date.now(),
-           updatedBy: userUid
-        }, { merge: true });
-      } catch (e) {
-        console.error("Sync push error", e);
-      }
-    };
-
-    pushData();
-  }, [debouncedDays, debouncedExpenses, debouncedShopping, debouncedSetup, debouncedParts, debouncedCats, debouncedRate, db, currentTripId, syncStatus, userUid]);
-
-  const joinTrip = async (targetId?: string) => {
-     if (!db) return; // Wait for DB
-     
-     const idToJoin = targetId || joinTripId;
-     if (!idToJoin) return;
-
-     setSyncStatus('connecting');
-     try {
-       const docRef = doc(db, "trips", idToJoin);
-       const docSnap = await getDoc(docRef);
-       
-       if (docSnap.exists()) {
-         const data = docSnap.data();
-         const exists = tripList.find(t => t.id === idToJoin);
-         
-         if (!exists) {
-           const newMeta: TripMeta = {
-             id: idToJoin,
-             destination: data.setup?.destination || '雲端行程',
-             startDate: data.setup?.startDate || '',
-             daysCount: data.setup?.days || 1
-           };
-           setTripList(prev => [newMeta, ...prev]);
-         }
-         
-         // Set immediate values from cloud to prevent empty flash
-         if (data.setup) setSetup(data.setup);
-         if (data.days) setDays(data.days);
-
-         switchTrip(idToJoin);
-         setSyncStatus('synced');
-         setShowCloudModal(false);
-         setJoinTripId('');
-         
-         // Clear URL param if present to keep URL clean
-         if (window.history.pushState) {
-             const newurl = window.location.protocol + "//" + window.location.host + window.location.pathname;
-             window.history.pushState({path:newurl},'',newurl);
-         }
-       } else {
-         alert("找不到此行程 ID，請確認連結是否正確。");
-         setSyncStatus('synced');
-       }
-     } catch (e) {
-       console.error(e);
-       alert("加入失敗，請檢查網路或 ID。");
-       setSyncStatus('error');
-     }
-  };
-
-  const copyShareLink = () => {
-      if (!currentTripId) return;
-      const url = `${window.location.origin}${window.location.pathname}?tripId=${currentTripId}`;
-      navigator.clipboard.writeText(url);
-      alert('邀請連結已複製！\n傳送給朋友，他們點開即可直接加入行程。');
-  };
 
   // --- Methods ---
 
@@ -946,10 +674,6 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {/* Share / Sync Button */}
-            <button onClick={() => setShowCloudModal(true)} className={`p-2.5 rounded-xl transition-all h-11 w-11 flex items-center justify-center border border-teal-500/30 ${db ? 'bg-teal-500 text-white shadow-inner' : 'bg-teal-500/30 text-teal-200 hover:bg-teal-500/50'}`}>
-               <i className={`ph-bold ${db ? (syncStatus === 'synced' ? 'ph-users' : 'ph-arrows-clockwise animate-spin') : 'ph-cloud-slash' } text-xl`}></i>
-            </button>
             <div className="flex bg-teal-800/50 p-1 rounded-lg">
               <button onClick={() => setViewMode('plan')} className={`p-2 rounded-md transition-all ${viewMode === 'plan' ? 'bg-white text-teal-700 shadow-sm' : 'text-teal-200'}`}><i className="ph-bold ph-calendar-check text-lg"></i></button>
               <button onClick={() => setViewMode('map')} className={`p-2 rounded-md transition-all ${viewMode === 'map' ? 'bg-white text-teal-700 shadow-sm' : 'text-teal-200'}`}><i className="ph-bold ph-map-trifold text-lg"></i></button>
@@ -1632,90 +1356,6 @@ export default function App() {
                  )}
               </div>
            </div>
-        </div>
-      )}
-
-      {/* Modal: Cloud Sync */}
-      {showCloudModal && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-6 animate-[fadeIn_0.2s_ease-out]">
-          <div className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl relative">
-            <button onClick={() => setShowCloudModal(false)} className="absolute right-4 top-4 text-slate-300 hover:text-slate-500"><i className="ph-bold ph-x text-xl"></i></button>
-            
-            <div className="flex flex-col items-center mb-6">
-              <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-3 transition-colors ${db ? 'bg-green-100 text-green-600' : 'bg-slate-100 text-slate-400'}`}>
-                <i className={`ph-duotone ${db ? 'ph-cloud-check' : 'ph-cloud-slash'} text-3xl`}></i>
-              </div>
-              <h2 className="text-xl font-bold text-slate-800">雲端同步與共享</h2>
-              <div className="flex items-center gap-2 mt-1">
-                 <div className={`w-2 h-2 rounded-full ${syncStatus === 'synced' ? 'bg-green-500' : syncStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`}></div>
-                 <span className="text-xs text-slate-500 font-bold">
-                    {syncStatus === 'synced' ? '已連線 Firebase' : syncStatus === 'connecting' ? '連線中...' : '尚未連線或錯誤'}
-                 </span>
-              </div>
-            </div>
-
-            {syncStatus === 'error' ? (
-              <div className="space-y-4">
-                <p className="text-xs text-red-500 leading-relaxed bg-red-50 p-3 rounded-xl border border-red-100">
-                  連線失敗。請確認您的 Firebase 設定是否正確，或網路是否正常。
-                </p>
-                <textarea 
-                  value={firebaseConfigStr}
-                  onChange={(e) => setFirebaseConfigStr(e.target.value)}
-                  placeholder='{ "apiKey": "...", "authDomain": "...", ... }'
-                  className="w-full h-32 bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-mono focus:ring-2 focus:ring-teal-500 outline-none resize-none"
-                ></textarea>
-                <button onClick={handleConnectCloud} className="w-full bg-slate-800 text-white font-bold py-3 rounded-xl hover:bg-slate-700 transition">
-                  重試連線
-                </button>
-              </div>
-            ) : syncStatus === 'synced' ? (
-              <div className="space-y-6">
-                <div className="bg-teal-50 p-4 rounded-xl border border-teal-100 text-center">
-                  <div className="flex items-center justify-center gap-2 mb-1">
-                      <div className="text-xs text-teal-600 font-bold">當前行程 ID</div>
-                      <button onClick={copyShareLink} className="bg-teal-100 hover:bg-teal-200 text-teal-700 text-[10px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1 transition-colors">
-                          <i className="ph-bold ph-link"></i> 複製邀請連結
-                      </button>
-                  </div>
-                  <div className="text-2xl font-black font-mono tracking-widest text-teal-800 select-all cursor-pointer" onClick={() => { navigator.clipboard.writeText(currentTripId || ''); alert('已複製 ID'); }}>
-                    {currentTripId}
-                  </div>
-                  <div className="text-[10px] text-teal-400 mt-2 flex items-center justify-center gap-1">
-                    <i className="ph-bold ph-check-circle"></i> 已與雲端即時同步
-                  </div>
-                </div>
-
-                <div>
-                   <div className="flex items-center gap-2 mb-2">
-                     <div className="h-px bg-slate-200 flex-1"></div>
-                     <span className="text-xs font-bold text-slate-400">加入其他行程</span>
-                     <div className="h-px bg-slate-200 flex-1"></div>
-                   </div>
-                   <div className="flex gap-2">
-                     <input 
-                       value={joinTripId}
-                       onChange={(e) => setJoinTripId(e.target.value)}
-                       placeholder="輸入朋友的行程 ID..." 
-                       className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-teal-500 outline-none" 
-                     />
-                     <button onClick={() => joinTrip()} className="bg-teal-600 text-white px-4 py-2 rounded-xl font-bold hover:bg-teal-700">
-                       加入
-                     </button>
-                   </div>
-                </div>
-                
-                <div className="text-[10px] text-center text-slate-300">
-                   User ID: {userUid?.substring(0, 8)}...
-                </div>
-              </div>
-            ) : (
-                <div className="text-center py-4">
-                    <i className="ph-duotone ph-spinner animate-spin text-3xl text-teal-500 mb-2"></i>
-                    <p className="text-sm text-slate-500">正在連線至雲端伺服器...</p>
-                </div>
-            )}
-          </div>
         </div>
       )}
 
